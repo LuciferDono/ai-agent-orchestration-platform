@@ -388,11 +388,11 @@ terraform apply
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## 🙋‍♂️ Support
-
+**None of below features are live till final deployement**
 - **Documentation**: [docs/](docs/)
 - **Issues**: [GitHub Issues](https://github.com/LuciferDono/ai-agent-orchestration-platform/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/LuciferDono/ai-agent-orchestration-platform/discussions)
-- **Email**: support@your-domain.com
+- **Email**: pranavj821@gmail.com
 
 ## 🗺️ Roadmap
 
