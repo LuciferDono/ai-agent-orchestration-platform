@@ -1,0 +1,294 @@
+version: '3.8'
+
+services:
+  # API Gateway
+  api-gateway:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/ai_orchestration
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=your-jwt-secret-key
+      - ENVIRONMENT=development
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./services/api-gateway:/app
+      - ./shared:/app/shared
+    networks:
+      - ai-orchestration-net
+
+  # Agent Registry Service
+  agent-registry:
+    build:
+      context: ./services/agent-registry
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/ai_orchestration
+      - REDIS_URL=redis://redis:6379
+      - ENVIRONMENT=development
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./services/agent-registry:/app
+      - ./shared:/app/shared
+    networks:
+      - ai-orchestration-net
+
+  # Orchestration Engine
+  orchestration-engine:
+    build:
+      context: ./services/orchestration-engine
+      dockerfile: Dockerfile
+    ports:
+      - "8002:8000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/ai_orchestration
+      - REDIS_URL=redis://redis:6379
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ENVIRONMENT=development
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./services/orchestration-engine:/app
+      - ./shared:/app/shared
+    networks:
+      - ai-orchestration-net
+
+  # Memory Management Service
+  memory-management:
+    build:
+      context: ./services/memory-management
+      dockerfile: Dockerfile
+    ports:
+      - "8003:8000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/ai_orchestration
+      - REDIS_URL=redis://redis:6379
+      - CHROMA_HOST=chroma
+      - CHROMA_PORT=8000
+      - ENVIRONMENT=development
+    depends_on:
+      - postgres
+      - redis
+      - chroma
+    volumes:
+      - ./services/memory-management:/app
+      - ./shared:/app/shared
+    networks:
+      - ai-orchestration-net
+
+  # Human-in-the-Loop Service
+  hitl-service:
+    build:
+      context: ./services/hitl-service
+      dockerfile: Dockerfile
+    ports:
+      - "8004:8000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/ai_orchestration
+      - REDIS_URL=redis://redis:6379
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT}
+      - SMTP_USERNAME=${SMTP_USERNAME}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - ENVIRONMENT=development
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./services/hitl-service:/app
+      - ./shared:/app/shared
+    networks:
+      - ai-orchestration-net
+
+  # Observability Service
+  observability:
+    build:
+      context: ./services/observability
+      dockerfile: Dockerfile
+    ports:
+      - "8005:8000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/ai_orchestration
+      - REDIS_URL=redis://redis:6379
+      - PROMETHEUS_URL=http://prometheus:9090
+      - ENVIRONMENT=development
+    depends_on:
+      - postgres
+      - redis
+      - prometheus
+    volumes:
+      - ./services/observability:/app
+      - ./shared:/app/shared
+    networks:
+      - ai-orchestration-net
+
+  # Web Dashboard
+  web-dashboard:
+    build:
+      context: ./web-ui
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+      - REACT_APP_ENVIRONMENT=development
+    volumes:
+      - ./web-ui:/app
+    networks:
+      - ai-orchestration-net
+
+  # Celery Worker
+  celery-worker:
+    build:
+      context: ./services/orchestration-engine
+      dockerfile: Dockerfile
+    command: celery -A app.celery worker --loglevel=info
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/ai_orchestration
+      - REDIS_URL=redis://redis:6379
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ENVIRONMENT=development
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./services/orchestration-engine:/app
+      - ./shared:/app/shared
+    networks:
+      - ai-orchestration-net
+
+  # Celery Beat (Scheduler)
+  celery-beat:
+    build:
+      context: ./services/orchestration-engine
+      dockerfile: Dockerfile
+    command: celery -A app.celery beat --loglevel=info
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/ai_orchestration
+      - REDIS_URL=redis://redis:6379
+      - ENVIRONMENT=development
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./services/orchestration-engine:/app
+      - ./shared:/app/shared
+    networks:
+      - ai-orchestration-net
+
+  # Flower (Celery Monitoring)
+  flower:
+    build:
+      context: ./services/orchestration-engine
+      dockerfile: Dockerfile
+    command: celery -A app.celery flower --port=5555
+    ports:
+      - "5555:5555"
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/ai_orchestration
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    networks:
+      - ai-orchestration-net
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: ai_orchestration
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/migration/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - ai-orchestration-net
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - ai-orchestration-net
+
+  # ChromaDB (Vector Database)
+  chroma:
+    image: chromadb/chroma:latest
+    ports:
+      - "8100:8000"
+    environment:
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/chroma/chroma
+    volumes:
+      - chroma_data:/chroma/chroma
+    networks:
+      - ai-orchestration-net
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infrastructure/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - ai-orchestration-net
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infrastructure/monitoring/grafana:/etc/grafana/provisioning
+    networks:
+      - ai-orchestration-net
+
+  # Jaeger (Distributed Tracing)
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686"
+      - "14268:14268"
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    networks:
+      - ai-orchestration-net
+
+networks:
+  ai-orchestration-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  chroma_data:
+  prometheus_data:
+  grafana_data:

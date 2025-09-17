@@ -1,0 +1,475 @@
+# Copyright (c) 2025 Pranav Jadhav. All rights reserved.
+# AI Agent Orchestration Platform - CI/CD Pipeline
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  release:
+    types: [published]
+
+env:
+  PYTHON_VERSION: '3.11'
+  NODE_VERSION: '18'
+  DOCKER_REGISTRY: ghcr.io
+  IMAGE_NAME: luciferdonno/ai-agent-orchestration-platform
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ===================== Code Quality & Security =====================
+  code-quality:
+    name: Code Quality & Security
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 black isort mypy bandit safety
+          pip install -r requirements.txt
+
+      - name: Python Code Formatting Check
+        run: |
+          black --check --diff .
+          isort --check-only --diff .
+
+      - name: Python Linting
+        run: |
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+      - name: Python Type Checking
+        run: |
+          mypy --install-types --non-interactive .
+
+      - name: Python Security Scan
+        run: |
+          bandit -r . -f json -o bandit-report.json || true
+          safety check --json --output safety-report.json || true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: web-ui/package-lock.json
+
+      - name: Install Frontend Dependencies
+        working-directory: ./web-ui
+        run: npm ci
+
+      - name: Frontend Linting
+        working-directory: ./web-ui
+        run: |
+          npm run lint
+          npm run build --if-present
+
+      - name: Upload Security Reports
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: security-reports
+          path: |
+            bandit-report.json
+            safety-report.json
+
+  # ===================== Testing =====================
+  test-backend:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: test_ai_orchestration
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pytest-asyncio
+
+      - name: Run Database Migrations
+        env:
+          DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/test_ai_orchestration
+          REDIS_URL: redis://localhost:6379/0
+        run: |
+          python scripts/migration/init_db.py
+
+      - name: Run Backend Tests
+        env:
+          DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/test_ai_orchestration
+          REDIS_URL: redis://localhost:6379/0
+          OPENAI_API_KEY: test-key
+        run: |
+          pytest tests/ --cov=services --cov=shared --cov=agents --cov-report=xml --cov-report=html
+
+      - name: Upload Coverage Reports
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+          flags: backend
+          name: backend-coverage
+
+  test-frontend:
+    name: Frontend Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: web-ui/package-lock.json
+
+      - name: Install Dependencies
+        working-directory: ./web-ui
+        run: npm ci
+
+      - name: Run Frontend Tests
+        working-directory: ./web-ui
+        run: |
+          npm test -- --coverage --watchAll=false
+          
+      - name: Upload Coverage Reports
+        uses: codecov/codecov-action@v3
+        with:
+          directory: ./web-ui/coverage
+          flags: frontend
+          name: frontend-coverage
+
+  # ===================== Integration Tests =====================
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [test-backend, test-frontend]
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: test_ai_orchestration
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+      chromadb:
+        image: chromadb/chroma:latest
+        ports:
+          - 8000:8000
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio httpx
+
+      - name: Wait for Services
+        run: |
+          sleep 30
+
+      - name: Initialize Database
+        env:
+          DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/test_ai_orchestration
+          REDIS_URL: redis://localhost:6379/0
+        run: |
+          python scripts/migration/init_db.py
+
+      - name: Run Integration Tests
+        env:
+          DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/test_ai_orchestration
+          REDIS_URL: redis://localhost:6379/0
+          CHROMA_HOST: localhost
+          CHROMA_PORT: 8000
+        run: |
+          pytest tests/integration/ -v
+
+  # ===================== Build Docker Images =====================
+  build:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    needs: [code-quality, test-backend, test-frontend]
+    if: github.event_name != 'pull_request'
+    outputs:
+      api-gateway-image: ${{ steps.meta-api-gateway.outputs.tags }}
+      agent-registry-image: ${{ steps.meta-agent-registry.outputs.tags }}
+      orchestration-engine-image: ${{ steps.meta-orchestration-engine.outputs.tags }}
+      memory-management-image: ${{ steps.meta-memory-management.outputs.tags }}
+      hitl-service-image: ${{ steps.meta-hitl-service.outputs.tags }}
+      web-ui-image: ${{ steps.meta-web-ui.outputs.tags }}
+    
+    strategy:
+      matrix:
+        service: [api-gateway, agent-registry, orchestration-engine, memory-management, hitl-service, web-ui]
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Metadata
+        id: meta-${{ matrix.service }}
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.service }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: services/${{ matrix.service }}/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-${{ matrix.service }}.outputs.tags }}
+          labels: ${{ steps.meta-${{ matrix.service }}.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ===================== Security Scanning =====================
+  security-scan:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.event_name != 'pull_request'
+    strategy:
+      matrix:
+        service: [api-gateway, agent-registry, orchestration-engine, memory-management, hitl-service, web-ui]
+    
+    steps:
+      - name: Run Trivy Vulnerability Scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.service }}:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-results-${{ matrix.service }}.sarif'
+
+      - name: Upload Trivy Scan Results
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results-${{ matrix.service }}.sarif'
+
+  # ===================== Deploy to Staging =====================
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [integration-tests, build]
+    if: github.ref == 'refs/heads/develop'
+    environment:
+      name: staging
+      url: https://staging.ai-orchestration.local
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Configure Kubernetes Context
+        run: |
+          echo "${{ secrets.KUBE_CONFIG_STAGING }}" | base64 -d > kubeconfig
+          export KUBECONFIG=kubeconfig
+
+      - name: Update Kubernetes Manifests
+        run: |
+          sed -i "s|IMAGE_TAG|${{ github.sha }}|g" infrastructure/k8s/staging/*.yaml
+
+      - name: Deploy to Staging
+        run: |
+          kubectl apply -f infrastructure/k8s/staging/
+          kubectl rollout status deployment/api-gateway -n ai-orchestration-staging
+          kubectl rollout status deployment/agent-registry -n ai-orchestration-staging
+          kubectl rollout status deployment/orchestration-engine -n ai-orchestration-staging
+
+      - name: Run Health Checks
+        run: |
+          sleep 60
+          kubectl get pods -n ai-orchestration-staging
+          curl -f https://staging.ai-orchestration.local/health || exit 1
+
+  # ===================== Deploy to Production =====================
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [security-scan]
+    if: github.event_name == 'release' && github.event.action == 'published'
+    environment:
+      name: production
+      url: https://ai-orchestration.local
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Configure Kubernetes Context
+        run: |
+          echo "${{ secrets.KUBE_CONFIG_PRODUCTION }}" | base64 -d > kubeconfig
+          export KUBECONFIG=kubeconfig
+
+      - name: Update Kubernetes Manifests
+        run: |
+          sed -i "s|IMAGE_TAG|${{ github.event.release.tag_name }}|g" infrastructure/k8s/production/*.yaml
+
+      - name: Deploy to Production
+        run: |
+          kubectl apply -f infrastructure/k8s/production/
+          kubectl rollout status deployment/api-gateway -n ai-orchestration-production
+          kubectl rollout status deployment/agent-registry -n ai-orchestration-production
+          kubectl rollout status deployment/orchestration-engine -n ai-orchestration-production
+
+      - name: Run Health Checks
+        run: |
+          sleep 60
+          kubectl get pods -n ai-orchestration-production
+          curl -f https://ai-orchestration.local/health || exit 1
+
+      - name: Notify Deployment Success
+        if: success()
+        run: |
+          echo "🚀 Production deployment successful!"
+          echo "Version: ${{ github.event.release.tag_name }}"
+
+  # ===================== Performance Tests =====================
+  performance-tests:
+    name: Performance Tests
+    runs-on: ubuntu-latest
+    needs: [deploy-staging]
+    if: github.ref == 'refs/heads/develop'
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up K6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6
+
+      - name: Run Performance Tests
+        run: |
+          k6 run tests/performance/load-test.js
+
+      - name: Upload Performance Results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: performance-results
+          path: performance-results.json
+
+  # ===================== Cleanup =====================
+  cleanup:
+    name: Cleanup
+    runs-on: ubuntu-latest
+    needs: [deploy-production, performance-tests]
+    if: always()
+    
+    steps:
+      - name: Clean up Docker Images
+        if: github.event_name != 'release'
+        run: |
+          echo "Cleaning up old Docker images..."
+          # This would typically clean up old images from the registry
+
+      - name: Summary Report
+        run: |
+          echo "## CI/CD Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Repository**: ${{ github.repository }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch**: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Triggered by**: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status**: ✅ Pipeline completed successfully" >> $GITHUB_STEP_SUMMARY
